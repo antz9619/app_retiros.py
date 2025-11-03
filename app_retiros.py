@@ -6,6 +6,8 @@ import os
 import logging
 from datetime import datetime
 import tempfile
+import io
+import base64
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +29,7 @@ def get_oca_config():
             "psw": oca_psw,
             "url_envios": "http://webservice.oca.com.ar/ePak_tracking/Oep_TrackEPak.asmx/IngresoORMultiplesRetiros",
             "url_centros_imposicion": "http://webservice.oca.com.ar/epak_tracking/Oep_TrackEPak.asmx/GetCentrosImposicionConServiciosByCP",
+            "url_etiquetas": "http://webservice.oca.com.ar/epak_tracking/Oep_Trackepak.asmx/GetPdfDeEtiquetasPorOrdenOrNumeroEnvioParaEtiquetadora",
             "origen": {
                 "nombre": "CIC",
                 "apellido": "Logistica",
@@ -171,6 +174,52 @@ def generar_xml_oca_retiros(df):
 
     return ET.tostring(root, encoding="iso-8859-1", xml_declaration=True)
 
+def descargar_etiquetas_pdf_10x15(orden_retiro):
+    """Descargar etiquetas PDF 10x15 desde OCA"""
+    try:
+        if not OCA_CONFIG:
+            return None, "Configuración OCA no disponible"
+
+        url = OCA_CONFIG["url_etiquetas"]
+        payload = {
+            "ordenRetiro": orden_retiro,
+            "numeroEnvio": "",
+            "logisticaInversa": "false"
+        }
+
+        response = requests.post(url, data=payload, timeout=30)
+        response.raise_for_status()
+        raw_xml = response.content.decode("utf-8")
+
+        logging.info(f"XML recibido para orden {orden_retiro}")
+
+        root = ET.fromstring(raw_xml)
+        string_node = next((elem for elem in root.iter() if 'string' in elem.tag), None)
+
+        if string_node is None or not string_node.text.strip():
+            logging.error("Error: Nodo <string> no encontrado o está vacío.")
+            return None, "Respuesta de OCA no contiene PDF válido"
+
+        try:
+            pdf_data = base64.b64decode(string_node.text)
+        except base64.binascii.Error as e:
+            logging.error(f"Error al decodificar el PDF: {e}")
+            return None, f"Error al procesar el PDF recibido: {e}"
+
+        return pdf_data, None
+
+    except requests.exceptions.RequestException as e:
+        if hasattr(e, 'response') and e.response is not None:
+            error_content = e.response.content.decode("utf-8", errors="ignore")
+            logging.error(f"Error HTTP: {str(e)}\nCuerpo de la respuesta:\n{error_content}")
+            return None, f"Error de conexión con OCA: {str(e)}"
+        else:
+            logging.error(f"Error HTTP: {str(e)}")
+            return None, f"Error de conexión con OCA: {str(e)}"
+    except Exception as e:
+        logging.error(f"Error inesperado: {str(e)}")
+        return None, f"Error inesperado: {str(e)}"
+
 def procesar_retiros_streamlit(archivo_subido):
     if not OCA_CONFIG:
         return {
@@ -289,16 +338,18 @@ def procesar_retiros_streamlit(archivo_subido):
                 else:
                     df.loc[df['obs'] == remito, 'Estado'] = f'Error: {resultado["error"]}'
 
-            # Guardar archivo procesado
-            archivo_procesado_path = os.path.join(temp_dir, "archivo_procesado_retiro.xlsx")
-            df.to_excel(archivo_procesado_path, index=False)
+            # Guardar archivo procesado en memoria
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Retiros_Procesados')
+            output.seek(0)
 
             return {
                 'exito': len(nros_envio_total) > 0,
                 'nros_envio': nros_envio_total,
                 'ordenes_retiro': ordenes_retiro,
                 'resultados_por_remito': resultados_por_remito,
-                'archivo_procesado': archivo_procesado_path,
+                'archivo_procesado': output,
                 'dataframe': df
             }
 
@@ -406,6 +457,24 @@ def main():
                         with st.expander(f"📦 Remito: {remito} - OR: {detalle['orden_retiro']}"):
                             st.write(f"**Números de envío:** {', '.join(detalle['nros_envio'])}")
                             st.write(f"**Orden de retiro:** {detalle['orden_retiro']}")
+                            
+                            # Botón para descargar etiquetas PDF
+                            st.subheader("🎫 Etiquetas PDF")
+                            if st.button(f"Descargar Etiquetas PDF", key=f"pdf_{detalle['orden_retiro']}"):
+                                with st.spinner("Generando etiquetas PDF..."):
+                                    pdf_data, error = descargar_etiquetas_pdf_10x15(detalle['orden_retiro'])
+                                
+                                if pdf_data:
+                                    st.success("✅ Etiquetas generadas correctamente")
+                                    st.download_button(
+                                        label="📄 Descargar Etiquetas PDF 10x15",
+                                        data=pdf_data,
+                                        file_name=f"etiquetas_{detalle['orden_retiro']}_10x15.pdf",
+                                        mime="application/pdf",
+                                        key=f"download_pdf_{detalle['orden_retiro']}"
+                                    )
+                                else:
+                                    st.error(f"❌ Error al generar etiquetas: {error}")
                 else:
                     st.info("No hay remitos exitosos")
             
@@ -420,14 +489,13 @@ def main():
 
             # Descargar archivo procesado
             st.subheader("📥 Descargar Resultados")
-            with open(resultado['archivo_procesado'], "rb") as f:
-                st.download_button(
-                    label="Descargar Archivo Procesado",
-                    data=f,
-                    file_name=f"retiros_procesados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.ms-excel",
-                    use_container_width=True
-                )
+            st.download_button(
+                label="Descargar Archivo Procesado",
+                data=resultado['archivo_procesado'],
+                file_name=f"retiros_procesados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.ms-excel",
+                use_container_width=True
+            )
 
         else:
             st.error("❌ Hubo errores en el procesamiento")

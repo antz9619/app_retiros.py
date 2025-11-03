@@ -350,7 +350,8 @@ def procesar_retiros_streamlit(archivo_subido):
                 'ordenes_retiro': ordenes_retiro,
                 'resultados_por_remito': resultados_por_remito,
                 'archivo_procesado': output,
-                'dataframe': df
+                'dataframe': df,
+                'nombre_archivo': archivo_subido.name
             }
 
     except Exception as e:
@@ -370,6 +371,14 @@ def main():
     st.title("📦 Sistema de Retiros OCA")
     st.markdown("---")
 
+    # Inicializar estado de la sesión
+    if 'procesamiento_completado' not in st.session_state:
+        st.session_state.procesamiento_completado = False
+    if 'resultados_procesamiento' not in st.session_state:
+        st.session_state.resultados_procesamiento = None
+    if 'archivo_procesado' not in st.session_state:
+        st.session_state.archivo_procesado = None
+
     # Verificar configuración
     if not OCA_CONFIG:
         st.error("""
@@ -388,7 +397,12 @@ def main():
         """)
         return
 
-    # Sección de subida de archivo
+    # Si ya se completó un procesamiento, mostrar solo los resultados
+    if st.session_state.procesamiento_completado and st.session_state.resultados_procesamiento:
+        mostrar_resultados(st.session_state.resultados_procesamiento)
+        return
+
+    # Sección de subida de archivo (solo se muestra si no hay procesamiento completado)
     st.header("1. Subir Archivo de Retiros")
     
     archivo_subido = st.file_uploader(
@@ -427,80 +441,13 @@ def main():
         with st.spinner("Procesando retiros con OCA..."):
             resultado = procesar_retiros_streamlit(archivo_subido)
 
+        # Guardar resultados en el estado de la sesión
+        st.session_state.procesamiento_completado = True
+        st.session_state.resultados_procesamiento = resultado
+        st.session_state.archivo_procesado = archivo_subido.name
+
         # Mostrar resultados
-        st.markdown("---")
-        st.header("3. Resultados del Procesamiento")
-
-        if resultado['exito']:
-            st.success("✅ Procesamiento completado exitosamente!")
-            
-            # Resumen general
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Números de Envío", len(resultado['nros_envio']))
-            with col2:
-                st.metric("Órdenes de Retiro", len(resultado['ordenes_retiro']))
-            with col3:
-                remitos_procesados = len([r for r in resultado['resultados_por_remito'].values() if r.get('estado') == 'éxito'])
-                st.metric("Remitos Exitosos", remitos_procesados)
-
-            # Detalles por remito
-            st.subheader("Detalles por Remito")
-            
-            # Crear tabs para organizar los resultados
-            tab1, tab2 = st.tabs(["✅ Exitosos", "❌ Con Errores"])
-            
-            with tab1:
-                remitos_exitosos = {k: v for k, v in resultado['resultados_por_remito'].items() if v.get('estado') == 'éxito'}
-                if remitos_exitosos:
-                    for remito, detalle in remitos_exitosos.items():
-                        with st.expander(f"📦 Remito: {remito} - OR: {detalle['orden_retiro']}"):
-                            st.write(f"**Números de envío:** {', '.join(detalle['nros_envio'])}")
-                            st.write(f"**Orden de retiro:** {detalle['orden_retiro']}")
-                            
-                            # Botón para descargar etiquetas PDF
-                            st.subheader("🎫 Etiquetas PDF")
-                            if st.button(f"Descargar Etiquetas PDF", key=f"pdf_{detalle['orden_retiro']}"):
-                                with st.spinner("Generando etiquetas PDF..."):
-                                    pdf_data, error = descargar_etiquetas_pdf_10x15(detalle['orden_retiro'])
-                                
-                                if pdf_data:
-                                    st.success("✅ Etiquetas generadas correctamente")
-                                    st.download_button(
-                                        label="📄 Descargar Etiquetas PDF 10x15",
-                                        data=pdf_data,
-                                        file_name=f"etiquetas_{detalle['orden_retiro']}_10x15.pdf",
-                                        mime="application/pdf",
-                                        key=f"download_pdf_{detalle['orden_retiro']}"
-                                    )
-                                else:
-                                    st.error(f"❌ Error al generar etiquetas: {error}")
-                else:
-                    st.info("No hay remitos exitosos")
-            
-            with tab2:
-                remitos_error = {k: v for k, v in resultado['resultados_por_remito'].items() if v.get('estado') == 'error'}
-                if remitos_error:
-                    for remito, detalle in remitos_error.items():
-                        with st.expander(f"❌ Remito: {remito}"):
-                            st.error(f"**Error:** {detalle['error']}")
-                else:
-                    st.info("No hay remitos con errores")
-
-            # Descargar archivo procesado
-            st.subheader("📥 Descargar Resultados")
-            st.download_button(
-                label="Descargar Archivo Procesado",
-                data=resultado['archivo_procesado'],
-                file_name=f"retiros_procesados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.ms-excel",
-                use_container_width=True
-            )
-
-        else:
-            st.error("❌ Hubo errores en el procesamiento")
-            if 'error' in resultado:
-                st.error(f"**Error:** {resultado['error']}")
+        mostrar_resultados(resultado)
 
     # Información de ayuda
     with st.expander("📋 Estructura Requerida del Archivo"):
@@ -530,6 +477,97 @@ def main():
             })
         else:
             st.error("Configuración no disponible")
+
+def mostrar_resultados(resultado):
+    """Función para mostrar los resultados del procesamiento"""
+    st.header("📊 Resultados del Procesamiento")
+    
+    # Botón para procesar un nuevo archivo
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🔄 Procesar un Nuevo Archivo", type="secondary", use_container_width=True):
+            # Resetear el estado de la sesión
+            st.session_state.procesamiento_completado = False
+            st.session_state.resultados_procesamiento = None
+            st.session_state.archivo_procesado = None
+            st.rerun()
+    
+    st.markdown("---")
+
+    if resultado['exito']:
+        st.success("✅ Procesamiento completado exitosamente!")
+        
+        # Mostrar información del archivo procesado
+        if 'nombre_archivo' in resultado:
+            st.info(f"**Archivo procesado:** {resultado['nombre_archivo']}")
+        
+        # Resumen general
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Números de Envío", len(resultado['nros_envio']))
+        with col2:
+            st.metric("Órdenes de Retiro", len(resultado['ordenes_retiro']))
+        with col3:
+            remitos_procesados = len([r for r in resultado['resultados_por_remito'].values() if r.get('estado') == 'éxito'])
+            st.metric("Remitos Exitosos", remitos_procesados)
+
+        # Detalles por remito
+        st.subheader("Detalles por Remito")
+        
+        # Crear tabs para organizar los resultados
+        tab1, tab2 = st.tabs(["✅ Exitosos", "❌ Con Errores"])
+        
+        with tab1:
+            remitos_exitosos = {k: v for k, v in resultado['resultados_por_remito'].items() if v.get('estado') == 'éxito'}
+            if remitos_exitosos:
+                for remito, detalle in remitos_exitosos.items():
+                    with st.expander(f"📦 Remito: {remito} - OR: {detalle['orden_retiro']}"):
+                        st.write(f"**Números de envío:** {', '.join(detalle['nros_envio'])}")
+                        st.write(f"**Orden de retiro:** {detalle['orden_retiro']}")
+                        
+                        # Botón para descargar etiquetas PDF
+                        st.subheader("🎫 Etiquetas PDF")
+                        if st.button(f"Descargar Etiquetas PDF", key=f"pdf_{detalle['orden_retiro']}"):
+                            with st.spinner("Generando etiquetas PDF..."):
+                                pdf_data, error = descargar_etiquetas_pdf_10x15(detalle['orden_retiro'])
+                            
+                            if pdf_data:
+                                st.success("✅ Etiquetas generadas correctamente")
+                                st.download_button(
+                                    label="📄 Descargar Etiquetas PDF 10x15",
+                                    data=pdf_data,
+                                    file_name=f"etiquetas_{detalle['orden_retiro']}_10x15.pdf",
+                                    mime="application/pdf",
+                                    key=f"download_pdf_{detalle['orden_retiro']}"
+                                )
+                            else:
+                                st.error(f"❌ Error al generar etiquetas: {error}")
+            else:
+                st.info("No hay remitos exitosos")
+        
+        with tab2:
+            remitos_error = {k: v for k, v in resultado['resultados_por_remito'].items() if v.get('estado') == 'error'}
+            if remitos_error:
+                for remito, detalle in remitos_error.items():
+                    with st.expander(f"❌ Remito: {remito}"):
+                        st.error(f"**Error:** {detalle['error']}")
+            else:
+                st.info("No hay remitos con errores")
+
+        # Descargar archivo procesado
+        st.subheader("📥 Descargar Resultados")
+        st.download_button(
+            label="Descargar Archivo Procesado",
+            data=resultado['archivo_procesado'],
+            file_name=f"retiros_procesados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.ms-excel",
+            use_container_width=True
+        )
+
+    else:
+        st.error("❌ Hubo errores en el procesamiento")
+        if 'error' in resultado:
+            st.error(f"**Error:** {resultado['error']}")
 
 if __name__ == "__main__":
     main()
